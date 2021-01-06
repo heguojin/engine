@@ -19,7 +19,6 @@
 #include "flutter/shell/platform/embedder/tests/embedder_test_compositor.h"
 #include "flutter/testing/elf_loader.h"
 #include "flutter/testing/test_dart_native_resolver.h"
-#include "flutter/testing/test_gl_surface.h"
 #include "third_party/skia/include/core/SkImage.h"
 
 namespace flutter {
@@ -38,6 +37,12 @@ struct AOTDataDeleter {
 };
 
 using UniqueAOTData = std::unique_ptr<_FlutterEngineAOTData, AOTDataDeleter>;
+
+enum class EmbedderTestContextType {
+  kSoftwareContext,
+  kOpenGLContext,
+  kMetalContext,
+};
 
 class EmbedderTestContext {
  public:
@@ -77,6 +82,8 @@ class EmbedderTestContext {
   EmbedderTestCompositor& GetCompositor();
 
   virtual size_t GetSurfacePresentCount() const = 0;
+
+  virtual EmbedderTestContextType GetContextType() const = 0;
 
   // TODO(gw280): encapsulate these properly for subclasses to use
  protected:

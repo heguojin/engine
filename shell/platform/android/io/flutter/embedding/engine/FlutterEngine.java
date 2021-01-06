@@ -5,11 +5,14 @@
 package io.flutter.embedding.engine;
 
 import android.content.Context;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.res.AssetManager;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import io.flutter.FlutterInjector;
 import io.flutter.Log;
 import io.flutter.embedding.engine.dart.DartExecutor;
+import io.flutter.embedding.engine.dynamicfeatures.DynamicFeatureManager;
 import io.flutter.embedding.engine.loader.FlutterLoader;
 import io.flutter.embedding.engine.plugins.PluginRegistry;
 import io.flutter.embedding.engine.plugins.activity.ActivityControlSurface;
@@ -19,6 +22,7 @@ import io.flutter.embedding.engine.plugins.service.ServiceControlSurface;
 import io.flutter.embedding.engine.renderer.FlutterRenderer;
 import io.flutter.embedding.engine.renderer.RenderSurface;
 import io.flutter.embedding.engine.systemchannels.AccessibilityChannel;
+import io.flutter.embedding.engine.systemchannels.DynamicFeatureChannel;
 import io.flutter.embedding.engine.systemchannels.KeyEventChannel;
 import io.flutter.embedding.engine.systemchannels.LifecycleChannel;
 import io.flutter.embedding.engine.systemchannels.LocalizationChannel;
@@ -79,6 +83,7 @@ public class FlutterEngine {
 
   // System channels.
   @NonNull private final AccessibilityChannel accessibilityChannel;
+  @NonNull private final DynamicFeatureChannel dynamicFeatureChannel;
   @NonNull private final KeyEventChannel keyEventChannel;
   @NonNull private final LifecycleChannel lifecycleChannel;
   @NonNull private final LocalizationChannel localizationChannel;
@@ -264,10 +269,20 @@ public class FlutterEngine {
       @Nullable String[] dartVmArgs,
       boolean automaticallyRegisterPlugins,
       boolean waitForRestorationData) {
-    this.dartExecutor = new DartExecutor(flutterJNI, context.getAssets());
+    AssetManager assetManager;
+    try {
+      assetManager = context.createPackageContext(context.getPackageName(), 0).getAssets();
+    } catch (NameNotFoundException e) {
+      assetManager = context.getAssets();
+    }
+    this.dartExecutor = new DartExecutor(flutterJNI, assetManager);
     this.dartExecutor.onAttachedToJNI();
 
+    DynamicFeatureManager dynamicFeatureManager =
+        FlutterInjector.instance().dynamicFeatureManager();
+
     accessibilityChannel = new AccessibilityChannel(dartExecutor, flutterJNI);
+    dynamicFeatureChannel = new DynamicFeatureChannel(dartExecutor);
     keyEventChannel = new KeyEventChannel(dartExecutor);
     lifecycleChannel = new LifecycleChannel(dartExecutor);
     localizationChannel = new LocalizationChannel(dartExecutor);
@@ -278,6 +293,10 @@ public class FlutterEngine {
     settingsChannel = new SettingsChannel(dartExecutor);
     systemChannel = new SystemChannel(dartExecutor);
     textInputChannel = new TextInputChannel(dartExecutor);
+
+    if (dynamicFeatureManager != null) {
+      dynamicFeatureManager.setDynamicFeatureChannel(dynamicFeatureChannel);
+    }
 
     this.localizationPlugin = new LocalizationPlugin(context, localizationChannel);
 
@@ -291,6 +310,8 @@ public class FlutterEngine {
     flutterJNI.addEngineLifecycleListener(engineLifecycleListener);
     flutterJNI.setPlatformViewsController(platformViewsController);
     flutterJNI.setLocalizationPlugin(localizationPlugin);
+    flutterJNI.setDynamicFeatureManager(FlutterInjector.instance().dynamicFeatureManager());
+
     attachToJni();
 
     // TODO(mattcarroll): FlutterRenderer is temporally coupled to attach(). Remove that coupling if
@@ -366,7 +387,12 @@ public class FlutterEngine {
     platformViewsController.onDetachedFromJNI();
     dartExecutor.onDetachedFromJNI();
     flutterJNI.removeEngineLifecycleListener(engineLifecycleListener);
+    flutterJNI.setDynamicFeatureManager(null);
     flutterJNI.detachFromNativeAndReleaseResources();
+    if (FlutterInjector.instance().dynamicFeatureManager() != null) {
+      FlutterInjector.instance().dynamicFeatureManager().destroy();
+      dynamicFeatureChannel.setDynamicFeatureManager(null);
+    }
   }
 
   /**
@@ -468,6 +494,12 @@ public class FlutterEngine {
   @NonNull
   public SettingsChannel getSettingsChannel() {
     return settingsChannel;
+  }
+
+  /** System channel that allows manual installation and state querying of dynamic features. */
+  @NonNull
+  public DynamicFeatureChannel getDynamicFeatureChannel() {
+    return dynamicFeatureChannel;
   }
 
   /** System channel that sends memory pressure warnings from Android to Flutter. */

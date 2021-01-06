@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #include <algorithm>
 #include <iomanip>
@@ -63,10 +62,12 @@ static const std::string gAllowedDartFlags[] = {
     "--profile_period",
     "--random_seed",
     "--sample-buffer-duration",
+    "--trace-kernel",
     "--trace-reload",
     "--trace-reload-verbose",
     "--write-service-info",
     "--null_assertions",
+    "--strict_null_safety_checks",
 };
 // clang-format on
 
@@ -220,6 +221,10 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   // Enable Observatory
   settings.enable_observatory =
       !command_line.HasOption(FlagForSwitch(Switch::DisableObservatory));
+
+  // Enable mDNS Observatory Publication
+  settings.enable_observatory_publication = !command_line.HasOption(
+      FlagForSwitch(Switch::DisableObservatoryPublication));
 
   // Set Observatory Host
   if (command_line.HasOption(FlagForSwitch(Switch::DeviceObservatoryHost))) {
@@ -401,6 +406,12 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.purge_persistent_cache =
       command_line.HasOption(FlagForSwitch(Switch::PurgePersistentCache));
 
+  if (command_line.HasOption(FlagForSwitch(Switch::OldGenHeapSize))) {
+    std::string old_gen_heap_size;
+    command_line.GetOptionValue(FlagForSwitch(Switch::OldGenHeapSize),
+                                &old_gen_heap_size);
+    settings.old_gen_heap_size = std::stoi(old_gen_heap_size);
+  }
   return settings;
 }
 

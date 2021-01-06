@@ -1,7 +1,6 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-// FLUTTER_NOLINT
 
 #define RAPIDJSON_HAS_STDSTRING 1
 #include "flutter/shell/common/shell.h"
@@ -11,6 +10,7 @@
 #include <vector>
 
 #include "flutter/assets/directory_asset_bundle.h"
+#include "flutter/common/graphics/persistent_cache.h"
 #include "flutter/fml/file.h"
 #include "flutter/fml/icu_util.h"
 #include "flutter/fml/log_settings.h"
@@ -20,9 +20,9 @@
 #include "flutter/fml/paths.h"
 #include "flutter/fml/trace_event.h"
 #include "flutter/fml/unique_fd.h"
+#include "flutter/lib/ui/painting/path.h"
 #include "flutter/runtime/dart_vm.h"
 #include "flutter/shell/common/engine.h"
-#include "flutter/shell/common/persistent_cache.h"
 #include "flutter/shell/common/skia_event_tracer_impl.h"
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/common/vsync_waiter.h"
@@ -53,8 +53,11 @@ std::unique_ptr<Shell> Shell::CreateShellOnPlatformThread(
     return nullptr;
   }
 
-  auto shell =
-      std::unique_ptr<Shell>(new Shell(std::move(vm), task_runners, settings));
+  auto shell = std::unique_ptr<Shell>(
+      new Shell(std::move(vm), task_runners, settings,
+                std::make_shared<VolatilePathTracker>(
+                    task_runners.GetUITaskRunner(),
+                    !settings.skia_deterministic_rendering_on_cpu)));
 
   // Create the rasterizer on the raster thread.
   std::promise<std::unique_ptr<Rasterizer>> rasterizer_promise;
@@ -150,17 +153,18 @@ std::unique_ptr<Shell> Shell::CreateShellOnPlatformThread(
                                                    std::move(vsync_waiter));
 
         engine_promise.set_value(std::make_unique<Engine>(
-            *shell,                         //
-            dispatcher_maker,               //
-            *shell->GetDartVM(),            //
-            std::move(isolate_snapshot),    //
-            task_runners,                   //
-            platform_data,                  //
-            shell->GetSettings(),           //
-            std::move(animator),            //
-            weak_io_manager_future.get(),   //
-            unref_queue_future.get(),       //
-            snapshot_delegate_future.get()  //
+            *shell,                          //
+            dispatcher_maker,                //
+            *shell->GetDartVM(),             //
+            std::move(isolate_snapshot),     //
+            task_runners,                    //
+            platform_data,                   //
+            shell->GetSettings(),            //
+            std::move(animator),             //
+            weak_io_manager_future.get(),    //
+            unref_queue_future.get(),        //
+            snapshot_delegate_future.get(),  //
+            shell->volatile_path_tracker_    //
             ));
       }));
 
@@ -261,53 +265,28 @@ std::unique_ptr<Shell> Shell::Create(
 
   TRACE_EVENT0("flutter", "Shell::Create");
 
-  auto vm = DartVMRef::Create(settings);
-  FML_CHECK(vm) << "Must be able to initialize the VM.";
-
-  auto vm_data = vm->GetVMData();
-
-  return Shell::Create(std::move(task_runners),        //
-                       std::move(platform_data),       //
-                       std::move(settings),            //
-                       vm_data->GetIsolateSnapshot(),  // isolate snapshot
-                       on_create_platform_view,        //
-                       on_create_rasterizer,           //
-                       std::move(vm)                   //
-  );
-}
-
-std::unique_ptr<Shell> Shell::Create(
-    TaskRunners task_runners,
-    const PlatformData platform_data,
-    Settings settings,
-    fml::RefPtr<const DartSnapshot> isolate_snapshot,
-    const Shell::CreateCallback<PlatformView>& on_create_platform_view,
-    const Shell::CreateCallback<Rasterizer>& on_create_rasterizer,
-    DartVMRef vm) {
-  PerformInitializationTasks(settings);
-  PersistentCache::SetCacheSkSL(settings.cache_sksl);
-
-  TRACE_EVENT0("flutter", "Shell::CreateWithSnapshots");
-
   if (!task_runners.IsValid() || !on_create_platform_view ||
       !on_create_rasterizer) {
     return nullptr;
   }
 
+  auto vm = DartVMRef::Create(settings);
+  FML_CHECK(vm) << "Must be able to initialize the VM.";
+
   fml::AutoResetWaitableEvent latch;
   std::unique_ptr<Shell> shell;
   fml::TaskRunner::RunNowOrPostTask(
       task_runners.GetPlatformTaskRunner(),
-      fml::MakeCopyable([&latch,                                          //
-                         vm = std::move(vm),                              //
-                         &shell,                                          //
-                         task_runners = std::move(task_runners),          //
-                         platform_data,                                   //
-                         settings,                                        //
-                         isolate_snapshot = std::move(isolate_snapshot),  //
-                         on_create_platform_view,                         //
-                         on_create_rasterizer                             //
+      fml::MakeCopyable([&latch,                                  //
+                         vm = std::move(vm),                      //
+                         &shell,                                  //
+                         task_runners = std::move(task_runners),  //
+                         platform_data,                           //
+                         settings,                                //
+                         on_create_platform_view,                 //
+                         on_create_rasterizer                     //
   ]() mutable {
+        auto isolate_snapshot = vm->GetVMData()->GetIsolateSnapshot();
         shell = CreateShellOnPlatformThread(std::move(vm),
                                             std::move(task_runners),      //
                                             platform_data,                //
@@ -322,11 +301,15 @@ std::unique_ptr<Shell> Shell::Create(
   return shell;
 }
 
-Shell::Shell(DartVMRef vm, TaskRunners task_runners, Settings settings)
+Shell::Shell(DartVMRef vm,
+             TaskRunners task_runners,
+             Settings settings,
+             std::shared_ptr<VolatilePathTracker> volatile_path_tracker)
     : task_runners_(std::move(task_runners)),
       settings_(std::move(settings)),
       vm_(std::move(vm)),
       is_gpu_disabled_sync_switch_(new fml::SyncSwitch()),
+      volatile_path_tracker_(std::move(volatile_path_tracker)),
       weak_factory_gpu_(nullptr),
       weak_factory_(this) {
   FML_CHECK(vm_) << "Must have access to VM to create a shell.";
@@ -435,6 +418,21 @@ Shell::~Shell() {
         platform_latch.Signal();
       }));
   platform_latch.Wait();
+}
+
+std::unique_ptr<Shell> Shell::Spawn(
+    Settings settings,
+    const CreateCallback<PlatformView>& on_create_platform_view,
+    const CreateCallback<Rasterizer>& on_create_rasterizer) {
+  RunConfiguration configuration =
+      RunConfiguration::InferFromSettings(settings);
+  TaskRunners task_runners = task_runners_;
+  FML_DCHECK(task_runners.IsValid());
+  std::unique_ptr<Shell> result(Shell::Create(std::move(task_runners), settings,
+                                              on_create_platform_view,
+                                              on_create_rasterizer));
+  result->RunEngine(std::move(configuration));
+  return result;
 }
 
 void Shell::NotifyLowMemoryWarning() const {
@@ -548,6 +546,10 @@ bool Shell::Setup(std::unique_ptr<PlatformView> platform_view,
   rasterizer_ = std::move(rasterizer);
   io_manager_ = std::move(io_manager);
 
+  // Set the external view embedder for the rasterizer.
+  auto view_embedder = platform_view_->CreateExternalViewEmbedder();
+  rasterizer_->SetExternalViewEmbedder(view_embedder);
+
   // The weak ptr must be generated in the platform thread which owns the unique
   // ptr.
   weak_engine_ = engine_->GetWeakPtr();
@@ -563,8 +565,6 @@ bool Shell::Setup(std::unique_ptr<PlatformView> platform_view,
                                     });
 
   is_setup_ = true;
-
-  vm_->GetServiceProtocol()->AddHandler(this, GetServiceProtocolDescription());
 
   PersistentCache::GetCacheForProcess()->AddWorkerTaskRunner(
       task_runners_.GetIOTaskRunner());
@@ -1013,6 +1013,7 @@ void Shell::OnAnimatorNotifyIdle(int64_t deadline) {
 
   if (engine_) {
     engine_->NotifyIdle(deadline);
+    volatile_path_tracker_->OnFrame();
   }
 }
 
@@ -1151,6 +1152,23 @@ void Shell::OnPreEngineRestart() {
 }
 
 // |Engine::Delegate|
+void Shell::OnRootIsolateCreated() {
+  if (is_added_to_service_protocol_) {
+    return;
+  }
+  auto description = GetServiceProtocolDescription();
+  fml::TaskRunner::RunNowOrPostTask(
+      task_runners_.GetPlatformTaskRunner(),
+      [self = weak_factory_.GetWeakPtr(),
+       description = std::move(description)]() {
+        if (self) {
+          self->vm_->GetServiceProtocol()->AddHandler(self.get(), description);
+        }
+      });
+  is_added_to_service_protocol_ = true;
+}
+
+// |Engine::Delegate|
 void Shell::UpdateIsolateDescription(const std::string isolate_name,
                                      int64_t isolate_port) {
   Handler::Description description(isolate_port, isolate_name);
@@ -1164,14 +1182,34 @@ void Shell::SetNeedsReportTimings(bool value) {
 // |Engine::Delegate|
 std::unique_ptr<std::vector<std::string>> Shell::ComputePlatformResolvedLocale(
     const std::vector<std::string>& supported_locale_data) {
-  return ComputePlatformViewResolvedLocale(supported_locale_data);
+  return platform_view_->ComputePlatformResolvedLocales(supported_locale_data);
 }
 
-// |PlatformView::Delegate|
-std::unique_ptr<std::vector<std::string>>
-Shell::ComputePlatformViewResolvedLocale(
-    const std::vector<std::string>& supported_locale_data) {
-  return platform_view_->ComputePlatformResolvedLocales(supported_locale_data);
+void Shell::LoadDartDeferredLibrary(
+    intptr_t loading_unit_id,
+    std::unique_ptr<const fml::Mapping> snapshot_data,
+    std::unique_ptr<const fml::Mapping> snapshot_instructions) {
+  engine_->LoadDartDeferredLibrary(loading_unit_id, std::move(snapshot_data),
+                                   std::move(snapshot_instructions));
+}
+
+void Shell::LoadDartDeferredLibraryError(intptr_t loading_unit_id,
+                                         const std::string error_message,
+                                         bool transient) {
+  engine_->LoadDartDeferredLibraryError(loading_unit_id, error_message,
+                                        transient);
+}
+
+void Shell::UpdateAssetResolverByType(
+    std::unique_ptr<AssetResolver> updated_asset_resolver,
+    AssetResolver::AssetResolverType type) {
+  engine_->GetAssetManager()->UpdateResolverByType(
+      std::move(updated_asset_resolver), type);
+}
+
+// |Engine::Delegate|
+void Shell::RequestDartDeferredLibrary(intptr_t loading_unit_id) {
+  platform_view_->RequestDartDeferredLibrary(loading_unit_id);
 }
 
 void Shell::ReportTimings() {
@@ -1295,9 +1333,15 @@ bool Shell::HandleServiceProtocolMessage(
 // |ServiceProtocol::Handler|
 ServiceProtocol::Handler::Description Shell::GetServiceProtocolDescription()
     const {
+  FML_DCHECK(task_runners_.GetUITaskRunner()->RunsTasksOnCurrentThread());
+
+  if (!weak_engine_) {
+    return ServiceProtocol::Handler::Description();
+  }
+
   return {
-      engine_->GetUIIsolateMainPort(),
-      engine_->GetUIIsolateName(),
+      weak_engine_->GetUIIsolateMainPort(),
+      weak_engine_->GetUIIsolateName(),
   };
 }
 
@@ -1401,9 +1445,21 @@ bool Shell::OnServiceProtocolRunInView(
   configuration.SetEntrypointAndLibrary(engine_->GetLastEntrypoint(),
                                         engine_->GetLastEntrypointLibrary());
 
-  configuration.AddAssetResolver(
-      std::make_unique<DirectoryAssetBundle>(fml::OpenDirectory(
-          asset_directory_path.c_str(), false, fml::FilePermission::kRead)));
+  configuration.AddAssetResolver(std::make_unique<DirectoryAssetBundle>(
+      fml::OpenDirectory(asset_directory_path.c_str(), false,
+                         fml::FilePermission::kRead),
+      false));
+
+  // Preserve any original asset resolvers to avoid syncing unchanged assets
+  // over the DevFS connection.
+  auto old_asset_manager = engine_->GetAssetManager();
+  if (old_asset_manager != nullptr) {
+    for (auto& old_resolver : old_asset_manager->TakeResolvers()) {
+      if (old_resolver->IsValidAfterAssetManagerChange()) {
+        configuration.AddAssetResolver(std::move(old_resolver));
+      }
+    }
+  }
 
   auto& allocator = response->GetAllocator();
   response->SetObject();
@@ -1518,7 +1574,19 @@ bool Shell::OnServiceProtocolSetAssetBundlePath(
 
   asset_manager->PushFront(std::make_unique<DirectoryAssetBundle>(
       fml::OpenDirectory(params.at("assetDirectory").data(), false,
-                         fml::FilePermission::kRead)));
+                         fml::FilePermission::kRead),
+      false));
+
+  // Preserve any original asset resolvers to avoid syncing unchanged assets
+  // over the DevFS connection.
+  auto old_asset_manager = engine_->GetAssetManager();
+  if (old_asset_manager != nullptr) {
+    for (auto& old_resolver : old_asset_manager->TakeResolvers()) {
+      if (old_resolver->IsValidAfterAssetManagerChange()) {
+        asset_manager->PushBack(std::move(old_resolver));
+      }
+    }
+  }
 
   if (engine_->UpdateAssetManager(std::move(asset_manager))) {
     response->AddMember("type", "Success", allocator);
