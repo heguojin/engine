@@ -133,6 +133,22 @@ class RuntimeController : public PlatformConfigurationClient {
       std::shared_ptr<const fml::Mapping> persistent_isolate_data,
       std::shared_ptr<VolatilePathTracker> volatile_path_tracker);
 
+  //----------------------------------------------------------------------------
+  /// @brief      Create a RuntimeController that shares as many resources as
+  ///             possible with the calling RuntimeController such that together
+  ///             they occupy less memory.
+  /// @return     A RuntimeController with a running isolate.
+  /// @see        RuntimeController::RuntimeController
+  ///
+  std::unique_ptr<RuntimeController> Spawn(
+      RuntimeDelegate& client,
+      std::string advisory_script_uri,
+      std::string advisory_script_entrypoint,
+      const std::function<void(int64_t)>& idle_notification_callback,
+      const fml::closure& isolate_create_callback,
+      const fml::closure& isolate_shutdown_callback,
+      std::shared_ptr<const fml::Mapping> persistent_isolate_data) const;
+
   // |PlatformConfigurationClient|
   ~RuntimeController() override;
 
@@ -375,7 +391,7 @@ class RuntimeController : public PlatformConfigurationClient {
   ///
   /// @return     If the idle notification was forwarded to the running isolate.
   ///
-  bool NotifyIdle(int64_t deadline, size_t freed_hint);
+  virtual bool NotifyIdle(int64_t deadline, size_t freed_hint);
 
   //----------------------------------------------------------------------------
   /// @brief      Returns if the root isolate is running. The isolate must be
@@ -395,7 +411,8 @@ class RuntimeController : public PlatformConfigurationClient {
   /// @return     If the message was dispatched to the running root isolate.
   ///             This may fail is an isolate is not running.
   ///
-  virtual bool DispatchPlatformMessage(fml::RefPtr<PlatformMessage> message);
+  virtual bool DispatchPlatformMessage(
+      std::unique_ptr<PlatformMessage> message);
 
   //----------------------------------------------------------------------------
   /// @brief      Dispatch the specified pointer data message to the running
@@ -407,6 +424,20 @@ class RuntimeController : public PlatformConfigurationClient {
   ///             an isolate is not running.
   ///
   bool DispatchPointerDataPacket(const PointerDataPacket& packet);
+
+  //----------------------------------------------------------------------------
+  /// @brief      Dispatch the specified pointer data message to the running
+  ///             root isolate.
+  ///
+  /// @param[in]  packet    The key data message to dispatch to the isolate.
+  /// @param[in]  callback  Called when the framework has decided whether
+  ///                       to handle this key data.
+  ///
+  /// @return     If the key data message was dispatched. This may fail is
+  ///             an isolate is not running.
+  ///
+  bool DispatchKeyDataPacket(const KeyDataPacket& packet,
+                             KeyDataResponse callback);
 
   //----------------------------------------------------------------------------
   /// @brief      Dispatch the semantics action to the specified accessibility
@@ -478,6 +509,14 @@ class RuntimeController : public PlatformConfigurationClient {
   ///
   std::optional<uint32_t> GetRootIsolateReturnCode();
 
+  //----------------------------------------------------------------------------
+  /// @brief      Get an identifier that represents the Dart isolate group the
+  ///             root isolate is in.
+  ///
+  /// @return     The root isolate isolate group identifier, zero if one can't
+  ///             be established.
+  uint64_t GetRootIsolateGroup() const;
+
   //--------------------------------------------------------------------------
   /// @brief      Loads the Dart shared library into the Dart VM. When the
   ///             Dart library is loaded successfully, the Dart future
@@ -542,6 +581,23 @@ class RuntimeController : public PlatformConfigurationClient {
 
   // |PlatformConfigurationClient|
   void RequestDartDeferredLibrary(intptr_t loading_unit_id) override;
+  const fml::WeakPtr<IOManager>& GetIOManager() const { return io_manager_; }
+
+  virtual DartVM* GetDartVM() const { return vm_; }
+
+  const fml::RefPtr<const DartSnapshot>& GetIsolateSnapshot() const {
+    return isolate_snapshot_;
+  }
+
+  const PlatformData& GetPlatformData() const { return platform_data_; }
+
+  const fml::RefPtr<SkiaUnrefQueue>& GetSkiaUnrefQueue() const {
+    return unref_queue_;
+  }
+
+  const fml::WeakPtr<SnapshotDelegate>& GetSnapshotDelegate() const {
+    return snapshot_delegate_;
+  }
 
  protected:
   /// Constructor for Mocks.
@@ -576,6 +632,7 @@ class RuntimeController : public PlatformConfigurationClient {
   std::function<void(int64_t)> idle_notification_callback_;
   PlatformData platform_data_;
   std::weak_ptr<DartIsolate> root_isolate_;
+  std::weak_ptr<DartIsolate> spawning_isolate_;
   std::optional<uint32_t> root_isolate_return_code_;
   const fml::closure isolate_create_callback_;
   const fml::closure isolate_shutdown_callback_;
@@ -599,7 +656,7 @@ class RuntimeController : public PlatformConfigurationClient {
   void UpdateSemantics(SemanticsUpdate* update) override;
 
   // |PlatformConfigurationClient|
-  void HandlePlatformMessage(fml::RefPtr<PlatformMessage> message) override;
+  void HandlePlatformMessage(std::unique_ptr<PlatformMessage> message) override;
 
   // |PlatformConfigurationClient|
   FontCollection& GetFontCollection() override;

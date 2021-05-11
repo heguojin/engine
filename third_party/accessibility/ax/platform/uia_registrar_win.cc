@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ui/accessibility/platform/uia_registrar_win.h"
+#include "uia_registrar_win.h"
 #include <wrl/implements.h>
-#include "base/stl_util.h"
 
 namespace ui {
 

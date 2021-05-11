@@ -5,12 +5,11 @@
 #ifndef UI_ACCESSIBILITY_AX_MODE_H_
 #define UI_ACCESSIBILITY_AX_MODE_H_
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <ostream>
 #include <string>
 
-#include "ui/accessibility/ax_base_export.h"
+#include "ax_base_export.h"
 
 namespace ui {
 

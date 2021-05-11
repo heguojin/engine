@@ -8,10 +8,10 @@ import 'dart:js_util' as js_util;
 
 import 'package:test/bootstrap/browser.dart';
 import 'package:test/test.dart';
-import 'package:ui/src/engine.dart';
+import 'package:ui/src/engine/web_experiments.dart';
 
 const bool _defaultUseCanvasText = true;
-const bool _defaultUseCanvasRichText = false;
+const bool _defaultUseCanvasRichText = true;
 
 void main() {
   internalBootstrapBrowserTest(() => testMain);
